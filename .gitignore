@@ -1,0 +1,27 @@
+.gradle/
+
+# Gradle / Kotlin build outputs
+.gradle-local/
+.kotlin/
+build/
+**/build/
+
+# IntelliJ IDEA / Android Studio
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Editor temp files
+*.swp
+*.swo
+*~
