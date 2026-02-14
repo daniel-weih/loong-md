@@ -4,9 +4,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -41,15 +44,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.AnnotatedString
@@ -65,8 +71,10 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 fun App() {
@@ -181,6 +189,7 @@ fun App() {
                 MarkdownPane(
                     markdownText = markdownText,
                     editingText = editingText,
+                    markdownFilePath = selectedFile?.path,
                     isEditing = isEditing,
                     hasUnsavedChanges = hasUnsavedChanges,
                     saving = saving,
@@ -518,11 +527,35 @@ private sealed class TreeNode {
 
 private const val MarkdownLinkTag = "markdown_link"
 private data class LinkBounds(val start: Int, val end: Int)
+private data class ImageReference(
+    val alt: String,
+    val source: String,
+    val widthPx: Int? = null,
+    val heightPx: Int? = null
+)
+private sealed interface MarkdownImageState {
+    data object Loading : MarkdownImageState
+    data class Success(val bitmap: ImageBitmap) : MarkdownImageState
+    data object Error : MarkdownImageState
+}
+private val htmlImgInCellRegex = Regex(
+    """(?is)^<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>$"""
+)
+private val htmlImgAltInCellRegex = Regex(
+    """(?is)\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+)
+private val htmlImgWidthInCellRegex = Regex(
+    """(?is)\bwidth\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+)
+private val htmlImgHeightInCellRegex = Regex(
+    """(?is)\bheight\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+)
 
 @Composable
 private fun MarkdownPane(
     markdownText: String,
     editingText: String,
+    markdownFilePath: String?,
     isEditing: Boolean,
     hasUnsavedChanges: Boolean,
     saving: Boolean,
@@ -598,7 +631,10 @@ private fun MarkdownPane(
                 .verticalScroll(scrollState)
         ) {
             blocks.forEach { block ->
-                MarkdownBlock(block)
+                MarkdownBlock(
+                    block = block,
+                    markdownFilePath = markdownFilePath
+                )
                 Spacer(Modifier.height(blockSpacing(block)))
             }
         }
@@ -606,7 +642,10 @@ private fun MarkdownPane(
 }
 
 @Composable
-private fun MarkdownBlock(block: MdBlock) {
+private fun MarkdownBlock(
+    block: MdBlock,
+    markdownFilePath: String?
+) {
     when (block) {
         is MdBlock.Heading -> {
             MarkdownRichText(
@@ -619,6 +658,23 @@ private fun MarkdownBlock(block: MdBlock) {
             MarkdownRichText(
                 text = block.text,
                 style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 28.sp)
+            )
+        }
+
+        is MdBlock.Image -> {
+            MarkdownImageBlock(
+                alt = block.alt,
+                source = block.source,
+                widthPx = block.widthPx,
+                heightPx = block.heightPx,
+                markdownFilePath = markdownFilePath
+            )
+        }
+
+        is MdBlock.TableRow -> {
+            MarkdownTableRow(
+                cells = block.cells,
+                markdownFilePath = markdownFilePath
             )
         }
 
@@ -694,6 +750,230 @@ private fun MarkdownBlock(block: MdBlock) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
+}
+
+@Composable
+private fun MarkdownTableRow(
+    cells: List<String>,
+    markdownFilePath: String?
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .padding(horizontal = 6.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        cells.forEach { cell ->
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .background(
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                val image = remember(cell) { parseImageReference(cell) }
+                if (image != null) {
+                    MarkdownImageBlock(
+                        alt = image.alt,
+                        source = image.source,
+                        widthPx = image.widthPx,
+                        heightPx = image.heightPx,
+                        markdownFilePath = markdownFilePath
+                    )
+                } else {
+                    MarkdownRichText(
+                        text = cell,
+                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownImageBlock(
+    alt: String,
+    source: String,
+    widthPx: Int?,
+    heightPx: Int?,
+    markdownFilePath: String?
+) {
+    val state by produceState<MarkdownImageState>(
+        initialValue = MarkdownImageState.Loading,
+        key1 = source,
+        key2 = markdownFilePath
+    ) {
+        val bitmap = withContext(Dispatchers.Default) {
+            loadMarkdownImageBitmap(source, markdownFilePath)
+        }
+        value = if (bitmap != null) {
+            MarkdownImageState.Success(bitmap)
+        } else {
+            MarkdownImageState.Error
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        when (val imageState = state) {
+            MarkdownImageState.Loading -> {
+                Text(
+                    text = "图片加载中: ${alt.ifBlank { source }}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            MarkdownImageState.Error -> {
+                Text(
+                    text = "无法加载图片: ${alt.ifBlank { source }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
+            is MarkdownImageState.Success -> {
+                val ratio = imageState.bitmap.width.toFloat() /
+                    imageState.bitmap.height.coerceAtLeast(1).toFloat()
+                Image(
+                    bitmap = imageState.bitmap,
+                    contentDescription = alt.ifBlank { null },
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .then(
+                            imageSizeModifier(
+                                widthPx = widthPx,
+                                heightPx = heightPx,
+                                ratio = ratio
+                            )
+                        )
+                        .background(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        .padding(6.dp)
+                )
+            }
+        }
+
+        if (alt.isNotBlank()) {
+            Text(
+                text = alt,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+private fun parseImageReference(text: String): ImageReference? {
+    val trimmed = text.trim()
+    if (trimmed.isBlank()) return null
+
+    parseMarkdownImageReference(trimmed)?.let { return it }
+    parseHtmlImageReference(trimmed)?.let { return it }
+    return null
+}
+
+private fun parseMarkdownImageReference(text: String): ImageReference? {
+    if (!text.startsWith("![")) return null
+    val altEnd = text.indexOf(']')
+    if (altEnd < 2 || altEnd + 1 >= text.length || text[altEnd + 1] != '(') return null
+    val sourceEnd = text.lastIndexOf(')')
+    if (sourceEnd <= altEnd + 2 || sourceEnd != text.lastIndex) return null
+
+    val alt = text.substring(2, altEnd).trim()
+    val raw = text.substring(altEnd + 2, sourceEnd).trim()
+    if (raw.isBlank()) return null
+    val source = raw.takeWhile { !it.isWhitespace() }.removeSurrounding("<", ">").trim()
+    if (source.isBlank()) return null
+
+    return ImageReference(
+        alt = alt,
+        source = source
+    )
+}
+
+private fun parseHtmlImageReference(text: String): ImageReference? {
+    val match = htmlImgInCellRegex.matchEntire(text) ?: return null
+    val source = (match.groupValues[1] + match.groupValues[2] + match.groupValues[3]).trim()
+    if (source.isBlank()) return null
+
+    val altMatch = htmlImgAltInCellRegex.find(text)
+    val alt = if (altMatch != null) {
+        (altMatch.groupValues[1] + altMatch.groupValues[2] + altMatch.groupValues[3]).trim()
+    } else {
+        ""
+    }
+
+    val widthPx = parseHtmlSizePx(htmlImgWidthInCellRegex.find(text)?.extractHtmlAttrValue())
+    val heightPx = parseHtmlSizePx(htmlImgHeightInCellRegex.find(text)?.extractHtmlAttrValue())
+
+    return ImageReference(
+        alt = alt,
+        source = source,
+        widthPx = widthPx,
+        heightPx = heightPx
+    )
+}
+
+private fun imageSizeModifier(
+    widthPx: Int?,
+    heightPx: Int?,
+    ratio: Float
+): Modifier {
+    val normalizedRatio = ratio.coerceAtLeast(0.1f)
+
+    return when {
+        widthPx != null && heightPx != null -> {
+            Modifier
+                .width(widthPx.dp)
+                .height(heightPx.dp)
+        }
+
+        widthPx != null -> {
+            Modifier
+                .width(widthPx.dp)
+                .aspectRatio(normalizedRatio)
+        }
+
+        heightPx != null -> {
+            Modifier
+                .height(heightPx.dp)
+                .aspectRatio(normalizedRatio, matchHeightConstraintsFirst = true)
+        }
+
+        else -> {
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(normalizedRatio)
+        }
+    }
+}
+
+private fun MatchResult.extractHtmlAttrValue(): String {
+    return (groupValues[1] + groupValues[2] + groupValues[3]).trim()
+}
+
+private fun parseHtmlSizePx(raw: String?): Int? {
+    if (raw.isNullOrBlank()) return null
+    val normalized = raw.trim().lowercase()
+    if (normalized.endsWith("%")) return null
+
+    val numeric = if (normalized.endsWith("px")) {
+        normalized.removeSuffix("px").trim()
+    } else {
+        normalized
+    }
+
+    val value = numeric.toFloatOrNull() ?: return null
+    if (value <= 0f) return null
+    return value.toInt()
 }
 
 @Composable

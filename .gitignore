@@ -25,3 +25,19 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# VS Code
+.vscode/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+key.properties
+*.jks
+*.keystore
+
+# JVM crash and profiler dumps
+hs_err_pid*
+replay_pid*
+*.hprof

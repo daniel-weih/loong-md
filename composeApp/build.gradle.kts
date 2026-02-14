@@ -65,5 +65,13 @@ android {
 compose.desktop {
     application {
         mainClass = "com.loongmd.MainKt"
+        nativeDistributions {
+            targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg)
+            packageName = "LoongMD"
+            packageVersion = "1.0.0"
+            macOS {
+                bundleID = "com.loongmd.desktop"
+            }
+        }
     }
 }

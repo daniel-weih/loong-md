@@ -3,6 +3,13 @@ package com.loongmd
 sealed interface MdBlock {
     data class Heading(val level: Int, val text: String) : MdBlock
     data class Paragraph(val text: String) : MdBlock
+    data class Image(
+        val alt: String,
+        val source: String,
+        val widthPx: Int? = null,
+        val heightPx: Int? = null
+    ) : MdBlock
+    data class TableRow(val cells: List<String>) : MdBlock
     data class UnorderedList(val items: List<MdListItem>) : MdBlock
     data class OrderedList(val items: List<MdListItem>) : MdBlock
     data class Quote(val text: String) : MdBlock
@@ -54,6 +61,19 @@ private val quoteRegex = Regex("""^\s{0,3}>\s?(.*)$""")
 private val horizontalRuleRegex = Regex("""^\s{0,3}((\*\s*){3,}|(-\s*){3,}|(_\s*){3,})\s*$""")
 private val codeFenceRegex = Regex("""^\s*```([^\s`]+)?\s*$""")
 private val autoLinkRegex = Regex("""(?i)(https?://|www\.)[^\s<>\[\]{}]+""")
+private val htmlImgRegex = Regex(
+    """(?is)^<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>$"""
+)
+private val htmlImgAltRegex = Regex(
+    """(?is)\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+)
+private val htmlImgWidthRegex = Regex(
+    """(?is)\bwidth\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+)
+private val htmlImgHeightRegex = Regex(
+    """(?is)\bheight\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+)
+private val tableSeparatorCellRegex = Regex("""^:?-{3,}:?$""")
 
 fun parseMarkdown(markdown: String): List<MdBlock> {
     if (markdown.isBlank()) return emptyList()
@@ -170,6 +190,35 @@ fun parseMarkdown(markdown: String): List<MdBlock> {
                 level = headingMatch.groupValues[1].length,
                 text = headingMatch.groupValues[2].trim()
             )
+            continue
+        }
+
+        val imageBlock = parseStandaloneImage(trimmed)
+        if (imageBlock != null) {
+            flushParagraph()
+            flushQuote()
+            flushList()
+            blocks += imageBlock
+            continue
+        }
+
+        val htmlImageBlock = parseStandaloneHtmlImage(trimmed)
+        if (htmlImageBlock != null) {
+            flushParagraph()
+            flushQuote()
+            flushList()
+            blocks += htmlImageBlock
+            continue
+        }
+
+        val tableRow = parseTableRow(trimmed)
+        if (tableRow != null) {
+            flushParagraph()
+            flushQuote()
+            flushList()
+            if (tableRow.isNotEmpty()) {
+                blocks += MdBlock.TableRow(tableRow)
+            }
             continue
         }
 
@@ -381,6 +430,71 @@ private fun parseLinkAt(text: String, start: Int): LinkMatch? {
     )
 }
 
+private fun parseStandaloneImage(line: String): MdBlock.Image? {
+    val trimmed = line.trim()
+    if (!trimmed.startsWith("![")) return null
+
+    val altEnd = findUnescapedChar(trimmed, ']', 2) ?: return null
+    if (altEnd + 1 >= trimmed.length || trimmed[altEnd + 1] != '(') return null
+
+    val sourceEnd = findUnescapedChar(trimmed, ')', altEnd + 2) ?: return null
+    if (sourceEnd != trimmed.lastIndex) return null
+
+    val alt = trimmed.substring(2, altEnd)
+    val rawSource = trimmed.substring(altEnd + 2, sourceEnd).trim()
+    val source = extractImageSource(rawSource) ?: return null
+
+    return MdBlock.Image(alt = alt, source = source)
+}
+
+private fun extractImageSource(raw: String): String? {
+    if (raw.isBlank()) return null
+
+    if (raw.startsWith("<")) {
+        val closingIndex = raw.indexOf('>')
+        if (closingIndex <= 1) return null
+        val enclosed = raw.substring(1, closingIndex).trim()
+        return enclosed.ifBlank { null }
+    }
+
+    val source = raw.takeWhile { !it.isWhitespace() }.trim()
+    return source.ifBlank { null }
+}
+
+private fun parseStandaloneHtmlImage(line: String): MdBlock.Image? {
+    val trimmed = line.trim()
+    val match = htmlImgRegex.matchEntire(trimmed) ?: return null
+    val source = (match.groupValues[1] + match.groupValues[2] + match.groupValues[3]).trim()
+    if (source.isBlank()) return null
+
+    val alt = htmlImgAltRegex.find(trimmed)?.extractHtmlAttrValue().orEmpty()
+    val widthPx = parseHtmlSizePx(htmlImgWidthRegex.find(trimmed)?.extractHtmlAttrValue())
+    val heightPx = parseHtmlSizePx(htmlImgHeightRegex.find(trimmed)?.extractHtmlAttrValue())
+
+    return MdBlock.Image(
+        alt = alt,
+        source = source,
+        widthPx = widthPx,
+        heightPx = heightPx
+    )
+}
+
+private fun parseTableRow(line: String): List<String>? {
+    val trimmed = line.trim()
+    if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return null
+
+    val cells = trimmed
+        .substring(1, trimmed.length - 1)
+        .split('|')
+        .map { it.trim() }
+
+    if (cells.isEmpty()) return null
+    val isSeparator = cells.all { it.isBlank() || tableSeparatorCellRegex.matches(it) }
+    if (isSeparator) return emptyList()
+
+    return cells
+}
+
 private fun parseAutoLinkAt(text: String, start: Int): LinkMatch? {
     if (start < 0 || start >= text.length) return null
 
@@ -440,6 +554,26 @@ private fun findUnescapedChar(text: String, char: Char, fromIndex: Int): Int? {
         index += 1
     }
     return null
+}
+
+private fun MatchResult.extractHtmlAttrValue(): String {
+    return (groupValues[1] + groupValues[2] + groupValues[3]).trim()
+}
+
+private fun parseHtmlSizePx(raw: String?): Int? {
+    if (raw.isNullOrBlank()) return null
+    val normalized = raw.trim().lowercase()
+    if (normalized.endsWith("%")) return null
+
+    val numeric = if (normalized.endsWith("px")) {
+        normalized.removeSuffix("px").trim()
+    } else {
+        normalized
+    }
+
+    val value = numeric.toFloatOrNull() ?: return null
+    if (value <= 0f) return null
+    return value.toInt()
 }
 
 private fun mergeAdjacentSpans(spans: List<MdInlineSpan>): List<MdInlineSpan> {
