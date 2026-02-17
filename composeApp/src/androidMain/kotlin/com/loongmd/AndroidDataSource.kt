@@ -40,6 +40,7 @@ private class AndroidMarkdownDataSource : MarkdownDataSource {
     override val rootDescription: String
         get() = "Android 演示数据"
     override val canSelectRoot: Boolean = false
+    override val supportsTreeContextActions: Boolean = false
 
     override suspend fun listMarkdownFiles(): List<MarkdownFile> {
         return demoDocs.keys.sorted().map {
@@ -64,6 +65,14 @@ private class AndroidMarkdownDataSource : MarkdownDataSource {
     }
 
     override suspend fun refreshRoot(): String? = null
+
+    override suspend fun revealInFinder(target: MarkdownTreeTarget) {
+        error("Android 端不支持在 Finder 显示")
+    }
+
+    override suspend fun moveToTrash(target: MarkdownTreeTarget) {
+        error("Android 端不支持移到废纸篓")
+    }
 }
 
 @Composable

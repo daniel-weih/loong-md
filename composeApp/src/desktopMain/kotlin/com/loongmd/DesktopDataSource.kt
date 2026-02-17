@@ -2,6 +2,7 @@ package com.loongmd
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import java.awt.Desktop
 import java.io.File
 import java.util.prefs.Preferences
 import javax.swing.JFileChooser
@@ -12,6 +13,7 @@ private class DesktopMarkdownDataSource : MarkdownDataSource {
     override val rootDescription: String
         get() = "目录: ${rootDir.absolutePath}"
     override val canSelectRoot: Boolean = true
+    override val supportsTreeContextActions: Boolean = true
 
     override suspend fun listMarkdownFiles(): List<MarkdownFile> {
         if (!rootDir.exists() || !rootDir.isDirectory) return emptyList()
@@ -56,6 +58,58 @@ private class DesktopMarkdownDataSource : MarkdownDataSource {
             }
         }
         return null
+    }
+
+    override suspend fun revealInFinder(target: MarkdownTreeTarget) {
+        val targetFile = resolveTargetFile(target)
+        if (!targetFile.exists()) {
+            error("目标不存在: ${targetFile.absolutePath}")
+        }
+
+        val isMac = System.getProperty("os.name")
+            ?.contains("mac", ignoreCase = true)
+            ?: false
+        if (isMac) {
+            val result = ProcessBuilder("open", "-R", targetFile.absolutePath)
+                .start()
+                .waitFor()
+            if (result != 0) {
+                error("无法在 Finder 中显示: ${targetFile.absolutePath}")
+            }
+            return
+        }
+
+        if (!Desktop.isDesktopSupported()) {
+            error("系统不支持桌面文件操作")
+        }
+        val toOpen = if (targetFile.isDirectory) targetFile else targetFile.parentFile ?: targetFile
+        Desktop.getDesktop().open(toOpen)
+    }
+
+    override suspend fun moveToTrash(target: MarkdownTreeTarget) {
+        val targetFile = resolveTargetFile(target)
+        if (!targetFile.exists()) {
+            error("目标不存在: ${targetFile.absolutePath}")
+        }
+        if (!Desktop.isDesktopSupported()) {
+            error("系统不支持移到废纸篓")
+        }
+        if (!Desktop.getDesktop().moveToTrash(targetFile)) {
+            error("移到废纸篓失败: ${targetFile.absolutePath}")
+        }
+    }
+
+    private fun resolveTargetFile(target: MarkdownTreeTarget): File {
+        return when (target) {
+            is MarkdownTreeTarget.FileTarget -> File(target.file.path)
+            is MarkdownTreeTarget.DirectoryTarget -> {
+                if (target.relativePath.isBlank()) {
+                    rootDir
+                } else {
+                    File(rootDir, target.relativePath.replace('/', File.separatorChar))
+                }
+            }
+        }
     }
 
     private fun loadRoot(): File {

@@ -2,6 +2,7 @@ package com.loongmd
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
@@ -19,14 +20,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.ClickableText
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -49,8 +55,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -168,6 +184,7 @@ fun App() {
                     selectedFile = selectedFile,
                     rootDescription = dataSource.rootDescription,
                     canSelectRoot = dataSource.canSelectRoot,
+                    supportsTreeContextActions = dataSource.supportsTreeContextActions,
                     loading = loading,
                     errorMessage = errorMessage,
                     onRefresh = { loadFiles() },
@@ -183,6 +200,25 @@ fun App() {
                         } else {
                             selectedFile = it
                             isEditing = false
+                        }
+                    },
+                    onRevealInFinder = { target ->
+                        scope.launch {
+                            runCatching { dataSource.revealInFinder(target) }
+                                .onFailure {
+                                    errorMessage = it.message ?: "在 Finder 显示失败"
+                                }
+                        }
+                    },
+                    onMoveToTrash = { target ->
+                        scope.launch {
+                            runCatching { dataSource.moveToTrash(target) }
+                                .onSuccess {
+                                    loadFiles()
+                                }
+                                .onFailure {
+                                    errorMessage = it.message ?: "移到废纸篓失败"
+                                }
                         }
                     }
                 )
@@ -212,14 +248,22 @@ private fun FilePane(
     selectedFile: MarkdownFile?,
     rootDescription: String,
     canSelectRoot: Boolean,
+    supportsTreeContextActions: Boolean,
     loading: Boolean,
     errorMessage: String?,
     onRefresh: () -> Unit,
     onSelectRoot: () -> Unit,
-    onSelectFile: (MarkdownFile) -> Unit
+    onSelectFile: (MarkdownFile) -> Unit,
+    onRevealInFinder: (MarkdownTreeTarget) -> Unit,
+    onMoveToTrash: (MarkdownTreeTarget) -> Unit
 ) {
     val tree = buildFileTree(files)
     val expandedDirectoryIds = remember { mutableStateMapOf<String, Boolean>() }
+    val listState = rememberLazyListState()
+    val listFocusRequester = remember { FocusRequester() }
+    val paneScope = rememberCoroutineScope()
+    var keyboardSelectedItemId by remember { mutableStateOf<String?>(null) }
+    var contextMenuItemId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(tree) {
         val directoryIds = collectDirectoryIds(tree).toSet()
@@ -238,6 +282,66 @@ private fun FilePane(
     }
 
     val visibleItems = flattenTree(tree, expandedDirectoryIds)
+    val customMdIcon = rememberCustomMarkdownFileIcon()
+    val selectedFileItemId = selectedFile?.let { "file:${it.id}" }
+
+    LaunchedEffect(visibleItems, selectedFileItemId) {
+        if (visibleItems.isEmpty()) {
+            keyboardSelectedItemId = null
+            return@LaunchedEffect
+        }
+        val visibleIds = visibleItems.map { it.id }.toSet()
+        if (contextMenuItemId != null && contextMenuItemId !in visibleIds) {
+            contextMenuItemId = null
+        }
+        keyboardSelectedItemId = when {
+            keyboardSelectedItemId != null && keyboardSelectedItemId in visibleIds -> keyboardSelectedItemId
+            selectedFileItemId != null && selectedFileItemId in visibleIds -> selectedFileItemId
+            else -> visibleItems.first().id
+        }
+    }
+
+    LaunchedEffect(visibleItems.isNotEmpty()) {
+        if (visibleItems.isNotEmpty()) {
+            delay(50)
+            listFocusRequester.requestFocus()
+        }
+    }
+
+    fun setKeyboardSelection(index: Int) {
+        if (visibleItems.isEmpty()) return
+        val bounded = index.coerceIn(0, visibleItems.lastIndex)
+        val selectedItem = visibleItems[bounded]
+        keyboardSelectedItemId = selectedItem.id
+        if (selectedItem is TreeListItem.FileItem) {
+            onSelectFile(selectedItem.file)
+        }
+        paneScope.launch {
+            listState.animateScrollToItem(bounded)
+        }
+    }
+
+    fun handleActivate(item: TreeListItem) {
+        when (item) {
+            is TreeListItem.DirectoryItem -> {
+                expandedDirectoryIds[item.id] = !(expandedDirectoryIds[item.id] ?: true)
+            }
+
+            is TreeListItem.FileItem -> {
+                onSelectFile(item.file)
+            }
+        }
+    }
+
+    fun toTreeTarget(item: TreeListItem): MarkdownTreeTarget {
+        return when (item) {
+            is TreeListItem.DirectoryItem -> MarkdownTreeTarget.DirectoryTarget(
+                relativePath = item.id.removePrefix("dir:")
+            )
+
+            is TreeListItem.FileItem -> MarkdownTreeTarget.FileTarget(item.file)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -268,68 +372,233 @@ private fun FilePane(
         }
 
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .focusRequester(listFocusRequester)
+                .focusable()
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown || visibleItems.isEmpty()) {
+                        return@onPreviewKeyEvent false
+                    }
+
+                    val currentIndex = visibleItems.indexOfFirst { it.id == keyboardSelectedItemId }
+                        .let { if (it >= 0) it else 0 }
+                    val currentItem = visibleItems[currentIndex]
+
+                    when (event.key) {
+                        Key.DirectionUp -> {
+                            setKeyboardSelection(currentIndex - 1)
+                            true
+                        }
+
+                        Key.DirectionDown -> {
+                            setKeyboardSelection(currentIndex + 1)
+                            true
+                        }
+
+                        Key.DirectionRight -> {
+                            if (currentItem is TreeListItem.DirectoryItem) {
+                                expandedDirectoryIds[currentItem.id] = true
+                                true
+                            } else {
+                                false
+                            }
+                        }
+
+                        Key.DirectionLeft -> {
+                            if (currentItem is TreeListItem.DirectoryItem) {
+                                expandedDirectoryIds[currentItem.id] = false
+                                true
+                            } else {
+                                false
+                            }
+                        }
+
+                        Key.Enter, Key.NumPadEnter, Key.Spacebar -> {
+                            handleActivate(currentItem)
+                            contextMenuItemId = null
+                            true
+                        }
+
+                        else -> false
+                    }
+                },
+            state = listState,
             contentPadding = PaddingValues(vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             items(visibleItems, key = { it.id }) { item ->
                 when (item) {
                     is TreeListItem.DirectoryItem -> {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    expandedDirectoryIds[item.id] = !(expandedDirectoryIds[item.id] ?: true)
+                        val keyboardSelected = item.id == keyboardSelectedItemId
+                        val background = if (keyboardSelected) {
+                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                        } else {
+                            Color.Transparent
+                        }
+                        val target = toTreeTarget(item)
+
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(background, RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        keyboardSelectedItemId = item.id
+                                        contextMenuItemId = null
+                                        listFocusRequester.requestFocus()
+                                        expandedDirectoryIds[item.id] = !(expandedDirectoryIds[item.id] ?: true)
+                                    }
+                                    .pointerInput(item.id, supportsTreeContextActions) {
+                                        if (!supportsTreeContextActions) return@pointerInput
+                                        awaitPointerEventScope {
+                                            while (true) {
+                                                val event = awaitPointerEvent()
+                                                if (
+                                                    event.type == PointerEventType.Press &&
+                                                    event.buttons.isSecondaryPressed
+                                                ) {
+                                                    keyboardSelectedItemId = item.id
+                                                    contextMenuItemId = item.id
+                                                    listFocusRequester.requestFocus()
+                                                    event.changes.forEach { it.consume() }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 8.dp)
+                            ) {
+                                Spacer(modifier = Modifier.width((item.depth * 16).dp))
+                                Text(
+                                    text = "📁",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (item.expanded) "▾" else "▸",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                EllipsizedNameText(
+                                    text = item.name,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+
+                            if (supportsTreeContextActions) {
+                                DropdownMenu(
+                                    expanded = contextMenuItemId == item.id,
+                                    onDismissRequest = { contextMenuItemId = null }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("在Finder显示") },
+                                        onClick = {
+                                            contextMenuItemId = null
+                                            onRevealInFinder(target)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("移到废纸篓") },
+                                        onClick = {
+                                            contextMenuItemId = null
+                                            onMoveToTrash(target)
+                                        }
+                                    )
                                 }
-                                .padding(horizontal = 8.dp, vertical = 8.dp)
-                        ) {
-                            Spacer(modifier = Modifier.width((item.depth * 16).dp))
-                            Text(
-                                text = "📁",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (item.expanded) "▾" else "▸",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            EllipsizedNameText(
-                                text = item.name,
-                                modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
+                            }
                         }
                     }
 
                     is TreeListItem.FileItem -> {
                         val selected = item.file.id == selectedFile?.id
+                        val keyboardSelected = item.id == keyboardSelectedItemId
                         val background = if (selected) {
                             MaterialTheme.colorScheme.secondaryContainer
+                        } else if (keyboardSelected) {
+                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
                         } else {
                             Color.Transparent
                         }
+                        val target = toTreeTarget(item)
 
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(background, RoundedCornerShape(8.dp))
-                                .clickable { onSelectFile(item.file) }
-                                .padding(horizontal = 8.dp, vertical = 10.dp)
-                        ) {
-                            Spacer(modifier = Modifier.width((item.depth * 16).dp))
-                            val icon = if (item.file.name.endsWith(".md", ignoreCase = true)) "📝" else "📄"
-                            Text(
-                                text = icon,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            EllipsizedNameText(
-                                text = item.file.name,
-                                modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(background, RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        keyboardSelectedItemId = item.id
+                                        contextMenuItemId = null
+                                        listFocusRequester.requestFocus()
+                                        onSelectFile(item.file)
+                                    }
+                                    .pointerInput(item.id, supportsTreeContextActions) {
+                                        if (!supportsTreeContextActions) return@pointerInput
+                                        awaitPointerEventScope {
+                                            while (true) {
+                                                val event = awaitPointerEvent()
+                                                if (
+                                                    event.type == PointerEventType.Press &&
+                                                    event.buttons.isSecondaryPressed
+                                                ) {
+                                                    keyboardSelectedItemId = item.id
+                                                    contextMenuItemId = item.id
+                                                    listFocusRequester.requestFocus()
+                                                    event.changes.forEach { it.consume() }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 10.dp)
+                            ) {
+                                Spacer(modifier = Modifier.width((item.depth * 16).dp))
+                                val isMarkdown = item.file.name.endsWith(".md", ignoreCase = true)
+                                if (isMarkdown && customMdIcon != null) {
+                                    Image(
+                                        bitmap = customMdIcon,
+                                        contentDescription = "Markdown file",
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .clip(RoundedCornerShape(4.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                } else {
+                                    Text(
+                                        text = if (isMarkdown) "📝" else "📄",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                EllipsizedNameText(
+                                    text = item.file.name,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+
+                            if (supportsTreeContextActions) {
+                                DropdownMenu(
+                                    expanded = contextMenuItemId == item.id,
+                                    onDismissRequest = { contextMenuItemId = null }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("在Finder显示") },
+                                        onClick = {
+                                            contextMenuItemId = null
+                                            onRevealInFinder(target)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("移到废纸篓") },
+                                        onClick = {
+                                            contextMenuItemId = null
+                                            onMoveToTrash(target)
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -625,17 +894,19 @@ private fun MarkdownPane(
             return
         }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(scrollState)
-        ) {
-            blocks.forEach { block ->
-                MarkdownBlock(
-                    block = block,
-                    markdownFilePath = markdownFilePath
-                )
-                Spacer(Modifier.height(blockSpacing(block)))
+        SelectionContainer {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+            ) {
+                blocks.forEach { block ->
+                    MarkdownBlock(
+                        block = block,
+                        markdownFilePath = markdownFilePath
+                    )
+                    Spacer(Modifier.height(blockSpacing(block)))
+                }
             }
         }
     }
@@ -1088,40 +1359,68 @@ private fun MarkdownRichText(
         )
     }
 
-    ClickableText(
+    BasicText(
         text = annotated,
         style = style,
         modifier = modifier
-            .pointerHoverIcon(
-                if (hoveredLinkBounds != null) PointerIcon.Hand else PointerIcon.Default
+            .then(
+                if (hoveredLinkBounds != null) {
+                    Modifier.pointerHoverIcon(PointerIcon.Hand)
+                } else {
+                    Modifier
+                }
             )
-            .pointerInput(textLayoutResult) {
+            .pointerInput(text, textLayoutResult) {
                 awaitPointerEventScope {
+                    var pressPosition: Offset? = null
+                    var movedAfterPress = false
+
                     while (true) {
                         val event = awaitPointerEvent()
-                        val nextHoveredLink = when {
-                            event.type == PointerEventType.Exit -> null
-                            textLayoutResult == null || annotated.text.isEmpty() -> null
-                            else -> {
-                                val pointerPosition = event.changes.firstOrNull()?.position ?: continue
-                                val layout = textLayoutResult ?: continue
-                                val width = layout.size.width.toFloat()
-                                val height = layout.size.height.toFloat()
-                                if (
-                                    pointerPosition.x < 0f ||
-                                    pointerPosition.y < 0f ||
-                                    pointerPosition.x > width ||
-                                    pointerPosition.y > height
-                                ) {
-                                    null
-                                } else {
-                                    val offset = layout.getOffsetForPosition(pointerPosition)
-                                    annotated
-                                        .getStringAnnotations(MarkdownLinkTag, offset, offset)
-                                        .firstOrNull()
-                                        ?.let { LinkBounds(start = it.start, end = it.end) }
+                        val pointerPosition = event.changes.firstOrNull()?.position
+
+                        when (event.type) {
+                            PointerEventType.Press -> {
+                                pressPosition = pointerPosition
+                                movedAfterPress = false
+                            }
+
+                            PointerEventType.Move -> {
+                                val down = pressPosition
+                                val current = pointerPosition
+                                if (down != null && current != null && !movedAfterPress) {
+                                    movedAfterPress = (current - down).getDistance() > 2f
                                 }
                             }
+
+                            PointerEventType.Release -> {
+                                if (!movedAfterPress) {
+                                    annotationAtPosition(
+                                        position = pointerPosition,
+                                        layout = textLayoutResult,
+                                        annotated = annotated
+                                    )?.let { openMarkdownLink(uriHandler, it.item) }
+                                }
+                                pressPosition = null
+                                movedAfterPress = false
+                            }
+
+                            PointerEventType.Exit -> {
+                                pressPosition = null
+                                movedAfterPress = false
+                            }
+
+                            else -> Unit
+                        }
+
+                        val nextHoveredLink = if (event.type == PointerEventType.Exit) {
+                            null
+                        } else {
+                            linkBoundsAtPosition(
+                                position = pointerPosition,
+                                layout = textLayoutResult,
+                                annotated = annotated
+                            )
                         }
 
                         if (nextHoveredLink != hoveredLinkBounds) {
@@ -1130,16 +1429,39 @@ private fun MarkdownRichText(
                     }
                 }
             },
-        onTextLayout = { textLayoutResult = it },
-        onClick = { offset ->
-            annotated
-                .getStringAnnotations(MarkdownLinkTag, offset, offset)
-                .firstOrNull()
-                ?.let { annotation ->
-                    openMarkdownLink(uriHandler, annotation.item)
-                }
-        }
+        onTextLayout = { textLayoutResult = it }
     )
+}
+
+private fun linkBoundsAtPosition(
+    position: Offset?,
+    layout: TextLayoutResult?,
+    annotated: AnnotatedString
+): LinkBounds? {
+    val annotation = annotationAtPosition(position, layout, annotated) ?: return null
+    return LinkBounds(start = annotation.start, end = annotation.end)
+}
+
+private fun annotationAtPosition(
+    position: Offset?,
+    layout: TextLayoutResult?,
+    annotated: AnnotatedString
+): AnnotatedString.Range<String>? {
+    if (position == null || layout == null || annotated.text.isEmpty()) return null
+
+    val width = layout.size.width.toFloat()
+    val height = layout.size.height.toFloat()
+    if (
+        position.x < 0f ||
+        position.y < 0f ||
+        position.x > width ||
+        position.y > height
+    ) {
+        return null
+    }
+
+    val offset = layout.getOffsetForPosition(position)
+    return annotated.getStringAnnotations(MarkdownLinkTag, offset, offset).firstOrNull()
 }
 
 private fun openMarkdownLink(uriHandler: UriHandler, rawUrl: String) {
