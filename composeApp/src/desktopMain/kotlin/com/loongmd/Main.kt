@@ -6,9 +6,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import java.awt.Frame
+import java.awt.Taskbar
+import java.awt.Toolkit
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.WindowStateListener
@@ -19,6 +22,7 @@ private const val PREF_Y = "window.y"
 private const val PREF_WIDTH = "window.width"
 private const val PREF_HEIGHT = "window.height"
 private const val PREF_MAXIMIZED = "window.maximized"
+private const val APP_NAME = "LoongMD"
 
 private val windowPrefs = Preferences.userRoot().node("com.loongmd.window")
 
@@ -30,51 +34,73 @@ private data class SavedWindowBounds(
     val maximized: Boolean
 )
 
-fun main() = application {
-    val savedBounds = remember { loadWindowBounds() }
-    var composeWindow by remember { mutableStateOf<Frame?>(null) }
+fun main() {
+    configureAppIdentity()
+    application {
+        applyDockIcon()
+        val savedBounds = remember { loadWindowBounds() }
+        var composeWindow by remember { mutableStateOf<Frame?>(null) }
 
-    Window(
-        onCloseRequest = {
-            composeWindow?.let { saveWindowBounds(it, flush = true) }
-            exitApplication()
-        },
-        title = "LoongMD"
-    ) {
-        LaunchedEffect(window) {
-            composeWindow = window
-            savedBounds?.let { bounds ->
-                window.setBounds(bounds.x, bounds.y, bounds.width, bounds.height)
-                if (bounds.maximized) {
-                    window.extendedState = window.extendedState or Frame.MAXIMIZED_BOTH
+        Window(
+            onCloseRequest = {
+                composeWindow?.let { saveWindowBounds(it, flush = true) }
+                exitApplication()
+            },
+            title = APP_NAME,
+            icon = painterResource("app_icon.png")
+        ) {
+            LaunchedEffect(window) {
+                composeWindow = window
+                savedBounds?.let { bounds ->
+                    window.setBounds(bounds.x, bounds.y, bounds.width, bounds.height)
+                    if (bounds.maximized) {
+                        window.extendedState = window.extendedState or Frame.MAXIMIZED_BOTH
+                    }
                 }
             }
-        }
 
-        DisposableEffect(window) {
-            val componentListener = object : ComponentAdapter() {
-                override fun componentMoved(event: ComponentEvent?) {
+            DisposableEffect(window) {
+                val componentListener = object : ComponentAdapter() {
+                    override fun componentMoved(event: ComponentEvent?) {
+                        saveWindowBounds(window)
+                    }
+
+                    override fun componentResized(event: ComponentEvent?) {
+                        saveWindowBounds(window)
+                    }
+                }
+                val stateListener = WindowStateListener {
                     saveWindowBounds(window)
                 }
 
-                override fun componentResized(event: ComponentEvent?) {
-                    saveWindowBounds(window)
+                window.addComponentListener(componentListener)
+                window.addWindowStateListener(stateListener)
+
+                onDispose {
+                    window.removeComponentListener(componentListener)
+                    window.removeWindowStateListener(stateListener)
+                    saveWindowBounds(window, flush = true)
                 }
             }
-            val stateListener = WindowStateListener {
-                saveWindowBounds(window)
-            }
+            App()
+        }
+    }
+}
 
-            window.addComponentListener(componentListener)
-            window.addWindowStateListener(stateListener)
+private fun configureAppIdentity() {
+    System.setProperty("apple.awt.application.name", APP_NAME)
+}
 
-            onDispose {
-                window.removeComponentListener(componentListener)
-                window.removeWindowStateListener(stateListener)
-                saveWindowBounds(window, flush = true)
+private fun applyDockIcon() {
+    runCatching {
+        val imageUrl = object {}.javaClass.getResource("/app_icon.png") ?: return
+        val image = Toolkit.getDefaultToolkit().getImage(imageUrl)
+        if (Taskbar.isTaskbarSupported()) {
+            val taskbar = Taskbar.getTaskbar()
+            if (taskbar.isSupported(Taskbar.Feature.ICON_IMAGE)) {
+                taskbar.iconImage = image
             }
         }
-        App()
     }
 }
 

@@ -65,12 +65,18 @@ android {
 compose.desktop {
     application {
         mainClass = "com.loongmd.MainKt"
+        jvmArgs += listOf(
+            "-Dapple.awt.application.name=LoongMD",
+            "-Xdock:name=LoongMD",
+            "-Xdock:icon=${project.file("src/desktopMain/resources/app_icon.png").absolutePath}"
+        )
         nativeDistributions {
             targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg)
             packageName = "LoongMD"
             packageVersion = "1.0.0"
             macOS {
                 bundleID = "com.loongmd.desktop"
+                iconFile.set(project.file("src/desktopMain/resources/LoongMD.icns"))
             }
         }
     }
