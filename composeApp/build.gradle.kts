@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidApplication)
@@ -77,6 +79,45 @@ compose.desktop {
             macOS {
                 bundleID = "com.loongmd.desktop"
                 iconFile.set(project.file("src/desktopMain/resources/LoongMD.icns"))
+            }
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "packageDmg") {
+        doLast {
+            val iconSource = layout.projectDirectory.file("src/desktopMain/resources/app_icon.png").asFile
+            if (!iconSource.exists()) return@doLast
+
+            val dmgDir = layout.buildDirectory.dir("compose/binaries/main/dmg").get().asFile
+            val dmgFile = dmgDir.listFiles()
+                ?.filter { it.isFile && it.extension.equals("dmg", ignoreCase = true) }
+                ?.maxByOrNull { it.lastModified() }
+                ?: return@doLast
+
+            val tempIcon = File.createTempFile("dmg_icon_", ".png")
+            val tempRsrc = File.createTempFile("dmg_icon_", ".rsrc")
+            fun run(vararg cmd: String) {
+                val process = ProcessBuilder(*cmd)
+                    .redirectErrorStream(true)
+                    .start()
+                val output = process.inputStream.bufferedReader().readText()
+                val exitCode = process.waitFor()
+                if (exitCode != 0) {
+                    error("Command failed (${cmd.joinToString(" ")}): $output")
+                }
+            }
+
+            try {
+                iconSource.copyTo(tempIcon, overwrite = true)
+                run("sips", "-i", tempIcon.absolutePath)
+                run("sh", "-c", "DeRez -only icns \"${tempIcon.absolutePath}\" > \"${tempRsrc.absolutePath}\"")
+                run("Rez", "-append", tempRsrc.absolutePath, "-o", dmgFile.absolutePath)
+                run("SetFile", "-a", "C", dmgFile.absolutePath)
+            } finally {
+                tempIcon.delete()
+                tempRsrc.delete()
             }
         }
     }
