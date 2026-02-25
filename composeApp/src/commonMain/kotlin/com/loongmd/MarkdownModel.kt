@@ -7,7 +7,8 @@ data class MarkdownFile(
     val id: String,
     val name: String,
     val path: String,
-    val relativePath: String
+    val relativePath: String,
+    val lastModified: Long = 0L
 )
 
 sealed interface MarkdownTreeTarget {

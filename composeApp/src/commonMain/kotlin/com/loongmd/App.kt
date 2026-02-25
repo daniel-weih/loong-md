@@ -111,13 +111,14 @@ fun App() {
         scope.launch {
             loading = true
             errorMessage = null
+            val selectedId = selectedFile?.id
             runCatching { dataSource.listMarkdownFiles() }
-                .onSuccess {
+                .onSuccess { latestFiles ->
                     files.clear()
-                    files.addAll(it)
-                    if (selectedFile == null || selectedFile !in it) {
-                        selectedFile = it.firstOrNull()
-                    }
+                    files.addAll(latestFiles)
+                    selectedFile = selectedId
+                        ?.let { currentId -> latestFiles.firstOrNull { it.id == currentId } }
+                        ?: latestFiles.firstOrNull()
                 }
                 .onFailure {
                     errorMessage = it.message ?: "加载文件失败"
@@ -678,6 +679,9 @@ private data class MutableDirectoryNode(
     val files: MutableList<MarkdownFile> = mutableListOf()
 )
 
+private val markdownTreeFileComparator = compareByDescending<MarkdownFile> { it.lastModified }
+    .thenBy { it.name.lowercase() }
+
 private fun buildFileTree(files: List<MarkdownFile>): List<TreeNode> {
     val root = MutableDirectoryNode(id = "__root__", name = "")
 
@@ -707,7 +711,7 @@ private fun buildFileTree(files: List<MarkdownFile>): List<TreeNode> {
     }
 
     return buildDirectories(root).map { TreeNode.Directory(it) } + root.files
-        .sortedBy { it.name.lowercase() }
+        .sortedWith(markdownTreeFileComparator)
         .map { TreeNode.File(it) }
 }
 
@@ -719,7 +723,7 @@ private fun buildDirectories(root: MutableDirectoryNode): List<TreeDirectory> {
                 id = it.id,
                 name = it.name,
                 directories = buildDirectories(it),
-                files = it.files.sortedBy { file -> file.name.lowercase() }
+                files = it.files.sortedWith(markdownTreeFileComparator)
             )
         }
 }

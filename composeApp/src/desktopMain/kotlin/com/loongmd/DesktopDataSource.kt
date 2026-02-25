@@ -27,7 +27,8 @@ private class DesktopMarkdownDataSource : MarkdownDataSource {
                     id = it.absolutePath,
                     name = it.name,
                     path = it.absolutePath,
-                    relativePath = relativePath
+                    relativePath = relativePath,
+                    lastModified = it.lastModified()
                 )
             }
             .toList()
