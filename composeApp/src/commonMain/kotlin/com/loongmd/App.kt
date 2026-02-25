@@ -63,6 +63,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -106,25 +107,23 @@ fun App() {
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
+    var watchSubscriptionVersion by remember { mutableStateOf(0) }
 
-    fun loadFiles() {
-        scope.launch {
-            loading = true
-            errorMessage = null
-            val selectedId = selectedFile?.id
-            runCatching { dataSource.listMarkdownFiles() }
-                .onSuccess { latestFiles ->
-                    files.clear()
-                    files.addAll(latestFiles)
-                    selectedFile = selectedId
-                        ?.let { currentId -> latestFiles.firstOrNull { it.id == currentId } }
-                        ?: latestFiles.firstOrNull()
-                }
-                .onFailure {
-                    errorMessage = it.message ?: "加载文件失败"
-                }
-            loading = false
-        }
+    suspend fun loadFiles(preferredSelectedId: String? = selectedFile?.id) {
+        loading = true
+        errorMessage = null
+        runCatching { dataSource.listMarkdownFiles() }
+            .onSuccess { latestFiles ->
+                files.clear()
+                files.addAll(latestFiles)
+                selectedFile = preferredSelectedId
+                    ?.let { currentId -> latestFiles.firstOrNull { it.id == currentId } }
+                    ?: latestFiles.firstOrNull()
+            }
+            .onFailure {
+                errorMessage = it.message ?: "加载文件失败"
+            }
+        loading = false
     }
 
     fun loadContent(file: MarkdownFile?) {
@@ -165,11 +164,18 @@ fun App() {
         }
     }
 
-    LaunchedEffect(Unit) {
-        loadFiles()
+    LaunchedEffect(dataSource) {
+        val initialSelectedId = runCatching { dataSource.loadLastSelectedFileId() }.getOrNull()
+        loadFiles(initialSelectedId)
+    }
+
+    LaunchedEffect(dataSource, watchSubscriptionVersion) {
+        dataSource.observeFileTreeChanges()
+            .collect { loadFiles() }
     }
 
     LaunchedEffect(selectedFile?.id) {
+        runCatching { dataSource.saveLastSelectedFileId(selectedFile?.id) }
         loadContent(selectedFile)
     }
 
@@ -188,10 +194,13 @@ fun App() {
                     supportsTreeContextActions = dataSource.supportsTreeContextActions,
                     loading = loading,
                     errorMessage = errorMessage,
-                    onRefresh = { loadFiles() },
+                    onRefresh = { scope.launch { loadFiles() } },
                     onSelectRoot = {
                         scope.launch {
-                            dataSource.refreshRoot()
+                            val refreshed = dataSource.refreshRoot()
+                            if (refreshed != null) {
+                                watchSubscriptionVersion += 1
+                            }
                             loadFiles()
                         }
                     },
@@ -213,13 +222,13 @@ fun App() {
                     },
                     onMoveToTrash = { target ->
                         scope.launch {
-                            runCatching { dataSource.moveToTrash(target) }
-                                .onSuccess {
-                                    loadFiles()
-                                }
-                                .onFailure {
-                                    errorMessage = it.message ?: "移到废纸篓失败"
-                                }
+                            val result = runCatching { dataSource.moveToTrash(target) }
+                            result.onFailure {
+                                errorMessage = it.message ?: "移到废纸篓失败"
+                            }
+                            if (result.isSuccess) {
+                                loadFiles()
+                            }
                         }
                     }
                 )
@@ -385,6 +394,8 @@ private fun FilePane(
                     val currentIndex = visibleItems.indexOfFirst { it.id == keyboardSelectedItemId }
                         .let { if (it >= 0) it else 0 }
                     val currentItem = visibleItems[currentIndex]
+                    val isCmdDelete = event.isMetaPressed &&
+                        (event.key == Key.Backspace || event.key == Key.Delete)
 
                     when (event.key) {
                         Key.DirectionUp -> {
@@ -419,6 +430,16 @@ private fun FilePane(
                             handleActivate(currentItem)
                             contextMenuItemId = null
                             true
+                        }
+
+                        Key.Backspace, Key.Delete -> {
+                            if (isCmdDelete && supportsTreeContextActions && currentItem is TreeListItem.FileItem) {
+                                onMoveToTrash(MarkdownTreeTarget.FileTarget(currentItem.file))
+                                contextMenuItemId = null
+                                true
+                            } else {
+                                false
+                            }
                         }
 
                         else -> false

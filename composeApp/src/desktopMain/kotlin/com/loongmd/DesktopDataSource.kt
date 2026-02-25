@@ -2,8 +2,24 @@ package com.loongmd
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.awt.Desktop
 import java.io.File
+import java.nio.file.ClosedWatchServiceException
+import java.nio.file.FileSystems
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardWatchEventKinds
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.prefs.Preferences
 import javax.swing.JFileChooser
 
@@ -28,7 +44,7 @@ private class DesktopMarkdownDataSource : MarkdownDataSource {
                     name = it.name,
                     path = it.absolutePath,
                     relativePath = relativePath,
-                    lastModified = it.lastModified()
+                    lastModified = readLastModified(it)
                 )
             }
             .toList()
@@ -59,6 +75,25 @@ private class DesktopMarkdownDataSource : MarkdownDataSource {
             }
         }
         return null
+    }
+
+    override suspend fun loadLastSelectedFileId(): String? {
+        val storedPath = preferences.get(LAST_SELECTED_FILE_KEY, null) ?: return null
+        val file = File(storedPath)
+        if (!file.exists() || !file.isFile || !file.extension.equals("md", ignoreCase = true)) {
+            return null
+        }
+        return runCatching { file.relativeTo(rootDir) }
+            .map { storedPath }
+            .getOrNull()
+    }
+
+    override suspend fun saveLastSelectedFileId(fileId: String?) {
+        if (fileId.isNullOrBlank()) {
+            preferences.remove(LAST_SELECTED_FILE_KEY)
+        } else {
+            preferences.put(LAST_SELECTED_FILE_KEY, fileId)
+        }
     }
 
     override suspend fun revealInFinder(target: MarkdownTreeTarget) {
@@ -100,6 +135,85 @@ private class DesktopMarkdownDataSource : MarkdownDataSource {
         }
     }
 
+    override fun observeFileTreeChanges(): Flow<Unit> = callbackFlow {
+        val snapshotRoot = rootDir
+        if (!snapshotRoot.exists() || !snapshotRoot.isDirectory) {
+            awaitClose {}
+            return@callbackFlow
+        }
+
+        val watchService = FileSystems.getDefault().newWatchService()
+        val registeredDirs = mutableSetOf<Path>()
+
+        fun registerDirectory(path: Path) {
+            if (!registeredDirs.add(path)) return
+            path.register(
+                watchService,
+                StandardWatchEventKinds.ENTRY_CREATE,
+                StandardWatchEventKinds.ENTRY_DELETE,
+                StandardWatchEventKinds.ENTRY_MODIFY
+            )
+        }
+
+        fun registerRecursively(rootPath: Path) {
+            if (!Files.exists(rootPath) || !Files.isDirectory(rootPath)) return
+            Files.walkFileTree(
+                rootPath,
+                object : SimpleFileVisitor<Path>() {
+                    override fun preVisitDirectory(dir: Path, attrs: java.nio.file.attribute.BasicFileAttributes): FileVisitResult {
+                        registerDirectory(dir)
+                        return FileVisitResult.CONTINUE
+                    }
+                }
+            )
+        }
+
+        runCatching { registerRecursively(snapshotRoot.toPath()) }
+
+        val watchJob = launch(Dispatchers.IO) {
+            while (isActive) {
+                val key = try {
+                    watchService.take()
+                } catch (_: ClosedWatchServiceException) {
+                    break
+                } catch (_: InterruptedException) {
+                    break
+                }
+
+                val watchedDir = key.watchable() as? Path
+                var changed = false
+
+                key.pollEvents().forEach { rawEvent ->
+                    val eventKind = rawEvent.kind()
+                    if (eventKind == StandardWatchEventKinds.OVERFLOW) {
+                        changed = true
+                        return@forEach
+                    }
+
+                    changed = true
+
+                    if (eventKind == StandardWatchEventKinds.ENTRY_CREATE && watchedDir != null) {
+                        val createdName = rawEvent.context() as? Path ?: return@forEach
+                        val createdPath = watchedDir.resolve(createdName)
+                        if (Files.isDirectory(createdPath, LinkOption.NOFOLLOW_LINKS)) {
+                            runCatching { registerRecursively(createdPath) }
+                        }
+                    }
+                }
+
+                key.reset()
+                if (changed) {
+                    trySend(Unit)
+                }
+            }
+        }
+
+        awaitClose {
+            watchJob.cancel()
+            runCatching { watchService.close() }
+        }
+    }.conflate()
+
     private fun resolveTargetFile(target: MarkdownTreeTarget): File {
         return when (target) {
             is MarkdownTreeTarget.FileTarget -> File(target.file.path)
@@ -134,8 +248,17 @@ private class DesktopMarkdownDataSource : MarkdownDataSource {
         return if (docs.exists() && docs.isDirectory) docs else File(home)
     }
 
+    private fun readLastModified(file: File): Long {
+        return runCatching {
+            Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
+                .lastModifiedTime()
+                .toMillis()
+        }.getOrElse { file.lastModified() }
+    }
+
     companion object {
         private const val LAST_ROOT_KEY = "lastRootDir"
+        private const val LAST_SELECTED_FILE_KEY = "lastSelectedFilePath"
         private val preferences: Preferences =
             Preferences.userNodeForPackage(DesktopMarkdownDataSource::class.java)
     }

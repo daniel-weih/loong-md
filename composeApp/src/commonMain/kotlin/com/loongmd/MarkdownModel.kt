@@ -2,6 +2,8 @@ package com.loongmd
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.ImageBitmap
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 
 data class MarkdownFile(
     val id: String,
@@ -27,6 +29,9 @@ interface MarkdownDataSource {
     suspend fun refreshRoot(): String?
     suspend fun revealInFinder(target: MarkdownTreeTarget)
     suspend fun moveToTrash(target: MarkdownTreeTarget)
+    fun observeFileTreeChanges(): Flow<Unit> = emptyFlow()
+    suspend fun loadLastSelectedFileId(): String? = null
+    suspend fun saveLastSelectedFileId(fileId: String?) {}
 }
 
 @Composable
