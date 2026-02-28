@@ -3,6 +3,7 @@ package com.loongmd
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
@@ -89,8 +90,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -274,6 +276,7 @@ private fun FilePane(
     val paneScope = rememberCoroutineScope()
     var keyboardSelectedItemId by remember { mutableStateOf<String?>(null) }
     var contextMenuItemId by remember { mutableStateOf<String?>(null) }
+    var keyboardScrollJob by remember { mutableStateOf<Job?>(null) }
 
     LaunchedEffect(tree) {
         val directoryIds = collectDirectoryIds(tree).toSet()
@@ -326,8 +329,52 @@ private fun FilePane(
         if (selectedItem is TreeListItem.FileItem) {
             onSelectFile(selectedItem.file)
         }
-        paneScope.launch {
-            listState.animateScrollToItem(bounded)
+        keyboardScrollJob?.cancel()
+        keyboardScrollJob = paneScope.launch {
+            val visibleListItems = listState.layoutInfo.visibleItemsInfo
+            val firstVisibleIndex = visibleListItems.firstOrNull()?.index
+            val lastVisibleIndex = visibleListItems.lastOrNull()?.index
+
+            when {
+                firstVisibleIndex == null || lastVisibleIndex == null -> {
+                    listState.scrollToItem(bounded)
+                }
+
+                bounded < firstVisibleIndex -> {
+                    listState.scrollToItem(bounded)
+                }
+
+                bounded > lastVisibleIndex -> {
+                    listState.scrollToItem(bounded)
+                    val layoutInfoAfterJump = listState.layoutInfo
+                    val jumpedItem = layoutInfoAfterJump.visibleItemsInfo.firstOrNull { it.index == bounded }
+                    if (jumpedItem != null) {
+                        val desiredTopOffset = (
+                            layoutInfoAfterJump.viewportEndOffset - jumpedItem.size
+                        ).coerceAtLeast(layoutInfoAfterJump.viewportStartOffset)
+                        val shiftDown = jumpedItem.offset - desiredTopOffset
+                        if (shiftDown != 0) {
+                            listState.scrollBy(shiftDown.toFloat())
+                        }
+                    }
+                }
+            }
+
+            val updatedLayoutInfo = listState.layoutInfo
+            val selectedVisibleItem = updatedLayoutInfo.visibleItemsInfo
+                .firstOrNull { it.index == bounded }
+
+            if (selectedVisibleItem != null) {
+                val overflowTop = selectedVisibleItem.offset - updatedLayoutInfo.viewportStartOffset
+                if (overflowTop < 0) {
+                    listState.scrollBy(overflowTop.toFloat())
+                }
+                val itemBottom = selectedVisibleItem.offset + selectedVisibleItem.size
+                val overflowBottom = itemBottom - updatedLayoutInfo.viewportEndOffset
+                if (overflowBottom > 0) {
+                    listState.scrollBy(overflowBottom.toFloat())
+                }
+            }
         }
     }
 
@@ -446,8 +493,8 @@ private fun FilePane(
                     }
                 },
             state = listState,
-            contentPadding = PaddingValues(vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            contentPadding = PaddingValues(vertical = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             items(visibleItems, key = { it.id }) { item ->
                 when (item) {
@@ -488,7 +535,7 @@ private fun FilePane(
                                             }
                                         }
                                     }
-                                    .padding(horizontal = 8.dp, vertical = 8.dp)
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
                             ) {
                                 Spacer(modifier = Modifier.width((item.depth * 16).dp))
                                 Text(
@@ -573,7 +620,7 @@ private fun FilePane(
                                             }
                                         }
                                     }
-                                    .padding(horizontal = 8.dp, vertical = 10.dp)
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
                             ) {
                                 Spacer(modifier = Modifier.width((item.depth * 16).dp))
                                 val isMarkdown = item.file.name.endsWith(".md", ignoreCase = true)
