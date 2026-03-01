@@ -86,6 +86,17 @@ compose.desktop {
 
 tasks.configureEach {
     if (name == "packageDmg") {
+        doFirst {
+            val applicationsLink = layout.buildDirectory
+                .dir("compose/binaries/main/app")
+                .get()
+                .asFile
+                .resolve("Applications")
+            if (applicationsLink.exists()) {
+                applicationsLink.deleteRecursively()
+            }
+        }
+
         doLast {
             val iconSource = layout.projectDirectory.file("src/desktopMain/resources/app_icon.png").asFile
             if (!iconSource.exists()) return@doLast
